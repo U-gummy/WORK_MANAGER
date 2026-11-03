@@ -9,7 +9,8 @@
 erDiagram
     users ||--o{ team_memberships : "소속"
     teams ||--o{ team_memberships : "구성원"
-    users ||--o| slack_integrations : "슬랙 연동"
+    teams ||--o| team_slack_channels : "슬랙 채널"
+    teams ||--o{ team_notification_settings : "채널 발송 설정"
     users ||--o{ notification_preferences : "알림 설정"
 
     teams ||--o{ todo_types : "유형"
@@ -32,6 +33,7 @@ erDiagram
 
     teams ||--o{ lunch_menus : "메뉴"
     lunch_menus ||--o{ lunch_draws : "추첨 결과"
+    users ||--o{ audit_logs : "수행"
     team_memberships ||--o{ lunch_draws : "추첨"
 
     users {
@@ -40,6 +42,7 @@ erDiagram
         varchar password_hash
         varchar name
         varchar email
+        varchar slack_member_id
         boolean super_admin
         varchar status "ACTIVE | INACTIVE"
         boolean must_change_password
@@ -59,11 +62,17 @@ erDiagram
         varchar role "TEAM_ADMIN | MEMBER"
         varchar status "ACTIVE | INACTIVE"
     }
-    slack_integrations {
-        bigint id PK
-        bigint user_id FK,UK
+    team_slack_channels {
+        bigint team_id PK,FK
         varchar webhook_url_enc
+        varchar webhook_url_hint
         varchar status "CONNECTED | NEEDS_CHECK"
+        bigint registered_by FK
+    }
+    team_notification_settings {
+        bigint team_id PK,FK
+        varchar notification_type PK
+        boolean channel_enabled
     }
     notification_preferences {
         bigint user_id PK,FK
@@ -147,14 +156,23 @@ erDiagram
         varchar leave_type "FULL | AM_HALF | PM_HALF"
         char group_key
     }
+    audit_logs {
+        bigint id PK
+        bigint actor_id FK
+        bigint team_id "nullable"
+        varchar action
+        varchar target_type
+        bigint target_id
+        json detail
+    }
     holidays {
         date holiday_date PK
         varchar name
     }
     notifications {
         bigint id PK
-        bigint user_id FK
-        bigint team_id FK "nullable"
+        bigint user_id FK "nullable"
+        bigint team_id FK
         varchar type
         varchar source_type
         bigint source_id
@@ -215,9 +233,9 @@ CONSTRAINT fk_todos_owner
 
 | 범위 | 테이블 |
 |---|---|
-| 팀 범위 | `todo_types`, `todos`, `recurring_todo_rules`, `issues`, `issue_attachments`, `deployments`, `leaves`, `lunch_menus`, `lunch_draws` |
-| 사용자 범위 | `slack_integrations`, `notification_preferences`, `notifications` (본인 것만 조회) |
-| 시스템 | `users`, `teams`, `team_memberships`, `holidays` (슈퍼 관리자 또는 인증 로직만 접근) |
+| 팀 범위 | `team_slack_channels`, `team_notification_settings`, `todo_types`, `todos`, `recurring_todo_rules`, `issues`, `issue_attachments`, `deployments`, `leaves`, `lunch_menus`, `lunch_draws` |
+| 사용자 범위 | `notification_preferences`, `notifications` (본인 것만 조회) |
+| 시스템 | `users`, `teams`, `team_memberships`, `holidays`, `audit_logs` (슈퍼 관리자 또는 인증 로직만 접근) |
 
 ### 3.3 알림은 한 테이블이 "발송 예약"과 "알림함"을 겸한다
 
@@ -228,7 +246,7 @@ stateDiagram-v2
     [*] --> PENDING : 알림 예약
     PENDING --> SENT : 시각 도달, 슬랙 발송 성공
     PENDING --> FAILED : 슬랙 발송 실패
-    PENDING --> NO_SLACK : 슬랙 미연동
+    PENDING --> INBOX_ONLY : 팀 채널 없음, 채널 발송 꺼짐, 비공개 TODO
     PENDING --> MISSED : 서버가 꺼져 있어 시각 경과
     PENDING --> CANCELED : 원본 완료/취소/삭제, 소속 비활성화
     PENDING --> DISABLED : 사용자가 해당 알림 종류를 끔
@@ -238,7 +256,10 @@ stateDiagram-v2
 - `UNIQUE (source_type, source_id, type, scheduled_at)`: 같은 알림이 두 번 예약되는 것을 막습니다.
 - **놓친 알림 판단**: 서버가 켜질 때와 매 분 스케줄러가 `PENDING AND scheduled_at < now - 5분`인 행을 `MISSED`로 바꿉니다.
 - **알림함**에는 `PENDING`, `CANCELED`를 제외한 행이 보입니다.
-- `team_id`: 여러 팀에 소속된 사람에게 `[1팀]` 접두어를 붙이고, 알림함에서 팀 문맥을 보여주기 위한 값. 팀과 무관한 알림(계정 관련)은 `NULL`.
+- 발송 대상은 **알림의 `team_id`에 등록된 팀 채널**입니다. 채널이 없거나, 팀 관리자가 그 종류를 꺼두었거나, 비공개 TODO 알림이면 `INBOX_ONLY`가 되어 알림함에만 남습니다.
+- 수신자에게 `slack_member_id`가 있으면 메시지에 `<@멤버ID>` 멘션을 붙입니다.
+- `user_id`가 `NULL`인 행은 **팀 메시지**(예: 팀 합계 주간 통계)입니다. 채널로만 보내고 개인 알림함에는 보이지 않습니다.
+- 사용자가 `notification_preferences`에서 끈 종류는 `DISABLED`가 됩니다(본인 관련 알림을 채널에 올리지 않음).
 
 ### 3.4 TODO의 기간
 
@@ -268,7 +289,8 @@ stateDiagram-v2
 | login_id | VARCHAR(50) | NOT NULL, UK | 로그인 아이디 |
 | password_hash | VARCHAR(100) | NOT NULL | BCrypt |
 | name | VARCHAR(50) | NOT NULL | 표시 이름 |
-| email | VARCHAR(255) | NULL | 2단계 Slack Bot 연동용 |
+| email | VARCHAR(255) | NULL | 연락용. 이후 Slack Bot DM 확장 시 사용 |
+| slack_member_id | VARCHAR(20) | NULL | 채널 메시지 @멘션용 (예: `U01AB2CD3`). 본인이 등록 |
 | super_admin | BOOLEAN | NOT NULL, 기본 false | 슈퍼 관리자 여부. true면 팀 소속을 가질 수 없음 |
 | status | VARCHAR(20) | NOT NULL | `ACTIVE`, `INACTIVE` |
 | must_change_password | BOOLEAN | NOT NULL, 기본 true | 첫 로그인/초기화 후 true |
@@ -297,23 +319,31 @@ stateDiagram-v2
 
 - 팀 관리자 최대 2명: `role = TEAM_ADMIN AND status = ACTIVE`인 행이 2개를 넘지 않도록 **서비스에서 검증**(MySQL로는 조건부 개수 제약을 걸기 어려움). 동시 요청에 대비해 팀 행에 `SELECT ... FOR UPDATE`.
 
-**slack_integrations**
+**team_slack_channels** (팀당 0~1개, 팀 관리자가 관리)
 
 | 컬럼 | 타입 | 제약 | 설명 |
 |---|---|---|---|
-| id | BIGINT | PK | |
-| user_id | BIGINT | FK → users, UK | 계정당 1개 |
+| team_id | BIGINT | PK, FK → teams | 팀당 1개. 행이 없으면 슬랙 미사용 팀 |
 | webhook_url_enc | VARCHAR(500) | NOT NULL | AES-GCM 암호화. 키는 환경변수 |
 | webhook_url_hint | VARCHAR(30) | NOT NULL | 화면 표시용 `https://hooks.slack.com/…/abcd` |
 | status | VARCHAR(20) | NOT NULL | `CONNECTED`, `NEEDS_CHECK` |
 | verified_at | DATETIME(6) | NULL | 마지막 테스트 발송 성공 시각 |
+| registered_by | BIGINT | NOT NULL | FK (team_id, registered_by) → team_memberships |
+
+**team_notification_settings**
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|---|---|---|---|
+| team_id | BIGINT | PK, FK → teams | |
+| notification_type | VARCHAR(40) | PK | |
+| channel_enabled | BOOLEAN | NOT NULL | 행이 없으면 켜진 것으로 간주 |
 
 **notification_preferences**
 
 | 컬럼 | 타입 | 제약 | 설명 |
 |---|---|---|---|
 | user_id | BIGINT | PK, FK → users | |
-| notification_type | VARCHAR(40) | PK | `TODO_REMINDER`, `DEPLOY_REMINDER`, `LEAVE_REMINDER`, `WEEKLY_SUMMARY` 등 |
+| notification_type | VARCHAR(40) | PK | `TODO_REMINDER`, `DEPLOY_REMINDER`, `DEPLOY_ASSIGNED`, `LEAVE_NOTICE`, `TEAM_WEEKLY_SUMMARY` 등 |
 | enabled | BOOLEAN | NOT NULL | 행이 없으면 켜진 것으로 간주 |
 
 ### 4.2 TODO
@@ -348,6 +378,8 @@ stateDiagram-v2
 | status | VARCHAR(10) | NOT NULL | `OPEN`, `DONE` |
 | completed_at | DATETIME(6) | NULL | |
 | notify_at | DATETIME(6) | NULL | TODO당 알림 1개 |
+| original_period_start | DATE | NULL | 처음 이월될 때의 원래 기간 시작일 |
+| carried_over_count | INT | NOT NULL, 기본 0 | 이월 횟수 |
 | | | UK (recurring_rule_id, period_start) | 반복 생성 중복 방지 |
 | | | IDX (team_id, owner_id, period_start) | 내 할 일 |
 | | | IDX (team_id, period_start) | 팀 할 일, 통계 |
@@ -444,17 +476,30 @@ stateDiagram-v2
 | 컬럼 | 타입 | 제약 | 설명 |
 |---|---|---|---|
 | holiday_date | DATE | PK | |
-| name | VARCHAR(50) | NOT NULL | 공공데이터 API 또는 수동 입력으로 적재 |
+| name | VARCHAR(50) | NOT NULL | 슈퍼 관리자가 연 1회 입력 |
 
 ### 4.5 알림
+
+**audit_logs** (시스템 범위, 슈퍼 관리자만 조회)
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|---|---|---|---|
+| id | BIGINT | PK | |
+| actor_id | BIGINT | FK → users | 수행한 사람 |
+| team_id | BIGINT | NULL | 관련 팀 (FK 없음: 기록 보존) |
+| action | VARCHAR(40) | NOT NULL | `MEMBERSHIP_ADDED`, `MEMBERSHIP_DEACTIVATED`, `ROLE_CHANGED`, `TEAM_SETTING_CHANGED`, `SLACK_CHANNEL_CHANGED`, `TEAM_ARCHIVED` 등 |
+| target_type | VARCHAR(30) | NOT NULL | |
+| target_id | BIGINT | NOT NULL | |
+| detail | JSON | NULL | 변경 전/후 값. Webhook URL 같은 비밀 값은 저장하지 않음 |
+| | | IDX (created_at) | |
 
 **notifications**
 
 | 컬럼 | 타입 | 제약 | 설명 |
 |---|---|---|---|
 | id | BIGINT | PK | |
-| user_id | BIGINT | FK → users | 수신자 |
-| team_id | BIGINT | NULL, FK → teams | 팀 문맥 |
+| user_id | BIGINT | NULL, FK → users | 대상자. `NULL`이면 팀 메시지 |
+| team_id | BIGINT | NOT NULL, FK → teams | 발송할 팀 채널 |
 | type | VARCHAR(40) | NOT NULL | `notification_preferences.notification_type`과 같은 값 |
 | source_type | VARCHAR(20) | NULL | `TODO`, `DEPLOYMENT`, `LEAVE`, `SUMMARY` 등 |
 | source_id | BIGINT | NULL | |
@@ -490,6 +535,8 @@ stateDiagram-v2
 | user_id | BIGINT | NOT NULL | FK (team_id, user_id) → team_memberships |
 | menu_id | BIGINT | FK → lunch_menus | |
 | drawn_at | DATETIME(6) | NOT NULL | "최근 2주 제외"에 사용 |
+
+- 알림은 생성 후 **90일이 지나면 배치로 삭제**합니다.
 
 ## 5. 저장하지 않는 것
 
