@@ -1,7 +1,9 @@
-# ERD (초안 v0.3)
+# ERD (초안 v0.5)
 
 > 기준 문서: [PRD.md](PRD.md), [permissions.md](permissions.md), [features/](../features/)
 > DB: MySQL 8 · 문자셋 `utf8mb4` · 접근: Spring Data JPA
+> v0.5 변경: `customers` 추가(프로젝트의 고객사), 업무와 TODO에 `flow_url`(플로우 링크) 추가.
+> v0.4 변경: `projects`, `work_items` 추가. TODO, 반복 규칙, 이슈, 배포에 `project_id`, `work_item_id` 추가.
 > v0.3 변경: 단일 팀으로 단순화. `teams`, `team_memberships`, `audit_logs`, 모든 `team_id`와 `visibility` 컬럼 제거.
 
 ## 1. 전체 다이어그램
@@ -10,6 +12,13 @@
 erDiagram
     users ||--o{ notification_preferences : "알림 설정"
 
+    customers |o--o{ projects : "고객사"
+    projects ||--o{ work_items : "업무"
+    users ||--o{ work_items : "작성"
+    projects |o--o{ todos : "뱃지"
+    work_items |o--o{ todos : "TODO"
+    work_items |o--o{ issues : "이슈"
+    work_items |o--o{ deployments : "배포"
     users ||--o{ todos : "내 할 일"
     users ||--o{ recurring_todo_rules : "반복 규칙"
     recurring_todo_rules |o--o{ todos : "생성"
@@ -61,9 +70,33 @@ erDiagram
         varchar name UK
         int sort_order
     }
+    customers {
+        bigint id PK
+        varchar name UK
+    }
+    projects {
+        bigint id PK
+        bigint customer_id FK "nullable"
+        varchar name UK
+        varchar color
+        varchar status "ACTIVE | CLOSED"
+    }
+    work_items {
+        bigint id PK
+        bigint project_id FK
+        bigint author_id FK
+        varchar title
+        text description
+        date start_date
+        date end_date
+        varchar flow_url
+        varchar status "IN_PROGRESS | DONE"
+    }
     todos {
         bigint id PK
         bigint owner_id FK
+        bigint project_id FK "nullable"
+        bigint work_item_id FK "nullable"
         bigint type_id FK "nullable"
         bigint recurring_rule_id FK "nullable"
         date occurrence_date "nullable"
@@ -75,12 +108,15 @@ erDiagram
         varchar status "OPEN | DONE"
         datetime completed_at
         datetime notify_at
+        varchar flow_url
         date original_period_start
         int carried_over_count
     }
     recurring_todo_rules {
         bigint id PK
         bigint owner_id FK
+        bigint project_id FK "nullable"
+        bigint work_item_id FK "nullable"
         bigint type_id FK "nullable"
         varchar title
         varchar recurrence "DAILY | WEEKDAYS | WEEKLY | MONTHLY"
@@ -93,6 +129,8 @@ erDiagram
     issues {
         bigint id PK
         bigint author_id FK
+        bigint project_id FK "nullable"
+        bigint work_item_id FK "nullable"
         bigint todo_id FK "nullable"
         varchar title
         mediumtext content
@@ -113,6 +151,8 @@ erDiagram
         bigint id PK
         bigint registrant_id FK
         bigint assignee_id FK
+        bigint project_id FK "nullable"
+        bigint work_item_id FK "nullable"
         varchar title
         datetime scheduled_at
         varchar environment "DEV | PROD"
@@ -221,6 +261,22 @@ stateDiagram-v2
 
 슬랙 채널은 서비스 전체에 하나뿐이므로 `slack_channel`은 `id = 1`인 행만 가집니다(`CHECK (id = 1)`). 행이 없으면 슬랙 미사용입니다.
 
+### 3.5 프로젝트와 업무 연결 규칙
+
+TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 가집니다(둘 다 선택).
+
+| `work_item_id` | `project_id` | 의미 |
+|---|---|---|
+| 있음 | 업무의 프로젝트와 **같아야 함** | 업무에 연결 (프로젝트는 자동) |
+| 없음 | 있음 | 프로젝트에만 연결 |
+| 없음 | 없음 | 연결 없음 |
+
+- `project_id`를 업무에서 매번 찾지 않고 **함께 저장**하는 이유: TODO 목록을 프로젝트로 거르거나 뱃지를 그릴 때 조인 없이 바로 쓰기 위해서입니다.
+- 두 값이 어긋나지 않도록 **서비스 계층 한 곳**에서만 설정합니다. 업무를 고르면 그 업무의 `project_id`를 복사하고, 업무에 연결된 항목의 프로젝트를 직접 바꾸려 하면 거부합니다.
+- 업무를 삭제하면 연결된 항목의 `work_item_id`만 `NULL`이 되고 `project_id`는 유지됩니다(`ON DELETE SET NULL`).
+- 업무의 프로젝트는 등록 후 바꿀 수 없습니다. 바꿀 수 있게 하면 연결된 모든 항목을 함께 고쳐야 하기 때문입니다.
+- 이슈를 TODO에 등록하면 그 TODO의 `work_item_id`, `project_id`를 이슈에 복사합니다. 그래서 TODO가 삭제돼도 이슈는 업무에 남습니다.
+
 ## 4. 테이블 상세
 
 ### 4.1 계정
@@ -269,7 +325,43 @@ stateDiagram-v2
 | notification_type | VARCHAR(40) | PK | |
 | enabled | BOOLEAN | NOT NULL | 행이 없으면 켜진 것으로 간주 |
 
-### 4.3 TODO
+### 4.3 프로젝트 / 업무
+
+**customers** (관리자가 관리)
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|---|---|---|---|
+| id | BIGINT | PK | |
+| name | VARCHAR(50) | NOT NULL, UK | 예: A사 |
+
+- 프로젝트를 고객사로 묶어 거르고 보고서를 보기 위한 값입니다. TODO는 고객사를 직접 고르지 않습니다.
+
+**projects** (관리자가 관리)
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|---|---|---|---|
+| id | BIGINT | PK | |
+| customer_id | BIGINT | NULL, FK → customers | 사내 프로젝트는 없음 |
+| name | VARCHAR(50) | NOT NULL, UK | 시스템 단위 권장. 예: A사 쇼핑몰, A사 공통 |
+| color | VARCHAR(10) | NOT NULL | `BLUE`, `GREEN`, `PURPLE`, `ORANGE`, `RED`, `GRAY`. 뱃지 색 |
+| status | VARCHAR(10) | NOT NULL | `ACTIVE`, `CLOSED`. 삭제 대신 종료 |
+
+**work_items**
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|---|---|---|---|
+| id | BIGINT | PK | |
+| project_id | BIGINT | NOT NULL, FK → projects | 등록 후 변경 불가 |
+| author_id | BIGINT | NOT NULL, FK → users | 수정, 완료는 작성자만 |
+| title | VARCHAR(200) | NOT NULL | |
+| description | TEXT | NULL | 마크다운 |
+| flow_url | VARCHAR(500) | NULL | 플로우 업무 링크. `https://`로 시작해야 함 |
+| start_date | DATE | NULL | |
+| end_date | DATE | NULL | |
+| status | VARCHAR(15) | NOT NULL | `IN_PROGRESS`, `DONE` |
+| | | IDX (project_id, status) | 프로젝트별 업무 목록 |
+
+### 4.4 TODO
 
 **todo_types**
 
@@ -287,6 +379,8 @@ stateDiagram-v2
 |---|---|---|---|
 | id | BIGINT | PK | |
 | owner_id | BIGINT | NOT NULL, FK → users | 작성자 = 수행자 |
+| project_id | BIGINT | NULL, FK → projects | 3.5 참고. 뱃지, 필터 |
+| work_item_id | BIGINT | NULL, FK → work_items | |
 | type_id | BIGINT | NULL, FK → todo_types | |
 | recurring_rule_id | BIGINT | NULL, FK → recurring_todo_rules | ON DELETE SET NULL |
 | occurrence_date | DATE | NULL | 반복 규칙이 생성한 날짜. 이월해도 바뀌지 않음 |
@@ -298,11 +392,14 @@ stateDiagram-v2
 | status | VARCHAR(10) | NOT NULL | `OPEN`, `DONE` |
 | completed_at | DATETIME(6) | NULL | 완료 취소 시 NULL |
 | notify_at | DATETIME(6) | NULL | TODO당 알림 1개 |
+| flow_url | VARCHAR(500) | NULL | 플로우 업무 링크 |
 | original_period_start | DATE | NULL | 처음 이월될 때의 원래 기간 시작일 |
 | carried_over_count | INT | NOT NULL, 기본 0 | 이월 횟수 |
 | | | UK (recurring_rule_id, occurrence_date) | 반복 생성 중복 방지 (둘 다 NULL인 일반 TODO는 제외됨) |
 | | | IDX (owner_id, period_start) | 내 할 일 |
 | | | IDX (period_start) | 팀 할 일, 통계 |
+| | | IDX (project_id, period_start) | 프로젝트 필터, 프로젝트별 통계 |
+| | | IDX (work_item_id) | 업무 상세 |
 
 **recurring_todo_rules**
 
@@ -310,6 +407,8 @@ stateDiagram-v2
 |---|---|---|---|
 | id | BIGINT | PK | |
 | owner_id | BIGINT | NOT NULL, FK → users | |
+| project_id | BIGINT | NULL, FK → projects | 생성되는 TODO에 복사 |
+| work_item_id | BIGINT | NULL, FK → work_items | 생성되는 TODO에 복사 |
 | type_id | BIGINT | NULL, FK → todo_types | |
 | title | VARCHAR(200) | NOT NULL | |
 | recurrence | VARCHAR(10) | NOT NULL | `DAILY`, `WEEKDAYS`, `WEEKLY`, `MONTHLY` |
@@ -323,7 +422,7 @@ stateDiagram-v2
 - `WEEKDAYS`는 주말과 `holidays`를 건너뜁니다.
 - 규칙을 수정하면 이후 생성분부터 반영됩니다.
 
-### 4.4 이슈
+### 4.5 이슈
 
 **issues**
 
@@ -331,7 +430,9 @@ stateDiagram-v2
 |---|---|---|---|
 | id | BIGINT | PK | |
 | author_id | BIGINT | NOT NULL, FK → users | |
-| todo_id | BIGINT | NULL, FK → todos | ON DELETE SET NULL (TODO 삭제 시 독립 이슈로 남음) |
+| project_id | BIGINT | NULL, FK → projects | |
+| work_item_id | BIGINT | NULL, FK → work_items | TODO에 등록하면 TODO의 값을 복사 |
+| todo_id | BIGINT | NULL, FK → todos | ON DELETE SET NULL (TODO가 삭제돼도 업무에는 남음) |
 | title | VARCHAR(200) | NOT NULL | |
 | content | MEDIUMTEXT | NULL | 마크다운 |
 | cause | TEXT | NULL | 원인 |
@@ -339,6 +440,7 @@ stateDiagram-v2
 | status | VARCHAR(10) | NOT NULL | `OPEN`, `RESOLVED` |
 | resolved_at | DATETIME(6) | NULL | |
 | | | IDX (todo_id) | |
+| | | IDX (work_item_id) | 업무 상세 |
 | | | FULLTEXT (title, content) `WITH PARSER ngram` | 한국어 키워드 검색 |
 
 **issue_attachments**
@@ -352,7 +454,7 @@ stateDiagram-v2
 | content_type | VARCHAR(50) | NOT NULL | 이미지 타입만 허용 |
 | size_bytes | BIGINT | NOT NULL | 최대 10MB |
 
-### 4.5 배포 / 연차
+### 4.6 배포 / 연차
 
 **deployments**
 
@@ -361,6 +463,8 @@ stateDiagram-v2
 | id | BIGINT | PK | |
 | registrant_id | BIGINT | NOT NULL, FK → users | |
 | assignee_id | BIGINT | NOT NULL, FK → users | 활성 사용자만 지정 가능(서비스 검증) |
+| project_id | BIGINT | NULL, FK → projects | |
+| work_item_id | BIGINT | NULL, FK → work_items | |
 | title | VARCHAR(200) | NOT NULL | |
 | scheduled_at | DATETIME(6) | NOT NULL | 알림은 1시간 전 |
 | environment | VARCHAR(10) | NOT NULL | `DEV`, `PROD` |
@@ -391,7 +495,7 @@ stateDiagram-v2
 | holiday_date | DATE | PK | |
 | name | VARCHAR(50) | NOT NULL | 관리자가 연 1회 입력 |
 
-### 4.6 알림
+### 4.7 알림
 
 **notifications**
 
@@ -413,7 +517,7 @@ stateDiagram-v2
 | | | IDX (status, scheduled_at) | 스케줄러 |
 | | | IDX (user_id, created_at) | 알림함 |
 
-### 4.7 점심 룰렛
+### 4.8 점심 룰렛
 
 **lunch_menus**
 
@@ -436,6 +540,6 @@ stateDiagram-v2
 
 | 항목 | 이유 |
 |---|---|
-| 주간/월간 통계 | `todos`, `issues`, `leaves`에서 조회 시 계산. 데이터가 많아지면 그때 집계 테이블 추가 |
+| 주간/월간 통계, 월간 보고서 | `todos`, `issues`, `deployments`, `leaves`에서 조회 시 계산. 데이터가 많아지면 그때 집계 테이블 추가 |
 | 지연 여부 | `status`와 `period_end`로 계산 |
 | 작성자 비활성 표시 | `users.status`로 계산 |
