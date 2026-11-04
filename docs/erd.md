@@ -2,8 +2,8 @@
 
 > 기준 문서: [PRD.md](PRD.md), [permissions.md](permissions.md), [features/](../features/)
 > DB: MySQL 8 · 문자셋 `utf8mb4` · 접근: Spring Data JPA
-> v0.5 변경: `customers` 추가(프로젝트의 고객사), 업무와 TODO에 `flow_url`(플로우 링크) 추가.
-> v0.4 변경: `projects`, `work_items` 추가. TODO, 반복 규칙, 이슈, 배포에 `project_id`, `work_item_id` 추가.
+> v0.5 변경: `customers` 추가(프로젝트의 고객사), 업무와 할 일에 `flow_url`(플로우 링크) 추가.
+> v0.4 변경: `projects`, `work_items` 추가. 할 일, 반복 규칙, 이슈, 배포에 `project_id`, `work_item_id` 추가.
 > v0.3 변경: 단일 팀으로 단순화. `teams`, `team_memberships`, `audit_logs`, 모든 `team_id`와 `visibility` 컬럼 제거.
 
 ## 1. 전체 다이어그램
@@ -16,7 +16,7 @@ erDiagram
     projects ||--o{ work_items : "업무"
     users ||--o{ work_items : "작성"
     projects |o--o{ todos : "뱃지"
-    work_items |o--o{ todos : "TODO"
+    work_items |o--o{ todos : "할 일"
     work_items |o--o{ issues : "이슈"
     work_items |o--o{ deployments : "배포"
     work_items |o--o{ recurring_todo_rules : "반복 규칙"
@@ -234,7 +234,7 @@ UNIQUE KEY uk_users_single_admin (admin_marker)
 
 ### 3.2 알림은 한 테이블이 "발송 예약"과 "알림함"을 겸한다
 
-TODO, 배포, 연차, 주간 통계가 알림이 필요하면 `notifications`에 `PENDING` 행을 만들고, 스케줄러는 이 테이블만 봅니다. 새 기능이 생겨도 스케줄러를 고칠 필요가 없어요.
+할 일, 배포, 연차, 주간 통계가 알림이 필요하면 `notifications`에 `PENDING` 행을 만들고, 스케줄러는 이 테이블만 봅니다. 새 기능이 생겨도 스케줄러를 고칠 필요가 없어요.
 
 ```mermaid
 stateDiagram-v2
@@ -255,7 +255,7 @@ stateDiagram-v2
 - **알림함**에는 본인의 `PENDING`, `CANCELED`, `DISABLED`를 제외한 행이 보입니다.
 - 알림은 생성 후 **90일이 지나면 배치로 삭제**합니다.
 
-### 3.3 TODO의 기간
+### 3.3 할 일의 기간
 
 - `period_type` + `period_start`로 기간을 정하고, 조회를 쉽게 하려고 `period_end`도 함께 저장합니다.
   - `DAY`: start = end = 그날
@@ -263,8 +263,8 @@ stateDiagram-v2
   - `MONTH`: 1일 ~ 말일
 - **지연** = `status = OPEN AND period_end < 오늘` (저장하지 않고 계산)
 - **이월**하면 기간을 새로 정하고, 처음 이월할 때만 `original_period_start`에 원래 시작일을 기록하며, `carried_over_count`를 1 올립니다.
-- 반복 TODO로 생성된 TODO는 `recurring_rule_id`와 **바뀌지 않는 발생일 `occurrence_date`**를 가지고, `UNIQUE (recurring_rule_id, occurrence_date)`로 **같은 날 두 번 생성되는 것을 막습니다**(서버 재시작, 소급 생성 시 안전). `period_start`로 막지 않는 이유는, 어제 것을 오늘로 이월하면 오늘 생성될 TODO와 `period_start`가 겹치기 때문입니다.
-- 반복 규칙을 중지/삭제해도 이미 생성된 TODO는 남습니다(`ON DELETE SET NULL`).
+- 반복 할 일로 생성된 할 일은 `recurring_rule_id`와 **바뀌지 않는 발생일 `occurrence_date`**를 가지고, `UNIQUE (recurring_rule_id, occurrence_date)`로 **같은 날 두 번 생성되는 것을 막습니다**(서버 재시작, 소급 생성 시 안전). `period_start`로 막지 않는 이유는, 어제 것을 오늘로 이월하면 오늘 생성될 할 일과 `period_start`가 겹치기 때문입니다.
+- 반복 규칙을 중지/삭제해도 이미 생성된 할 일은 남습니다(`ON DELETE SET NULL`).
 
 ### 3.4 단일 행 설정 테이블
 
@@ -272,7 +272,7 @@ stateDiagram-v2
 
 ### 3.5 프로젝트와 업무 연결 규칙
 
-TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 가집니다(둘 다 선택).
+할 일, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 가집니다(둘 다 선택).
 
 | `work_item_id` | `project_id` | 의미 |
 |---|---|---|
@@ -280,11 +280,11 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | 없음 | 있음 | 프로젝트에만 연결 |
 | 없음 | 없음 | 연결 없음 |
 
-- `project_id`를 업무에서 매번 찾지 않고 **함께 저장**하는 이유: TODO 목록을 프로젝트로 거르거나 뱃지를 그릴 때 조인 없이 바로 쓰기 위해서입니다.
+- `project_id`를 업무에서 매번 찾지 않고 **함께 저장**하는 이유: 할 일 목록을 프로젝트로 거르거나 뱃지를 그릴 때 조인 없이 바로 쓰기 위해서입니다.
 - 두 값이 어긋나지 않도록 **서비스 계층 한 곳**에서만 설정합니다. 업무를 고르면 그 업무의 `project_id`를 복사하고, 업무에 연결된 항목의 프로젝트를 직접 바꾸려 하면 거부합니다.
 - 업무를 삭제하면 연결된 항목의 `work_item_id`만 `NULL`이 되고 `project_id`는 유지됩니다(`ON DELETE SET NULL`).
 - 업무의 프로젝트는 등록 후 바꿀 수 없습니다. 바꿀 수 있게 하면 연결된 모든 항목을 함께 고쳐야 하기 때문입니다.
-- 이슈를 TODO에 등록하면 그 TODO의 `work_item_id`, `project_id`를 이슈에 복사합니다. 그래서 TODO가 삭제돼도 이슈는 업무에 남습니다.
+- 이슈를 할 일에 등록하면 그 할 일의 `work_item_id`, `project_id`를 이슈에 복사합니다. 그래서 할 일이 삭제돼도 이슈는 업무에 남습니다.
 
 ## 4. 테이블 상세
 
@@ -343,7 +343,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | id | BIGINT | PK | |
 | name | VARCHAR(50) | NOT NULL, UK | 예: A사 |
 
-- 프로젝트를 고객사로 묶어 거르고 보고서를 보기 위한 값입니다. TODO는 고객사를 직접 고르지 않습니다.
+- 프로젝트를 고객사로 묶어 거르고 보고서를 보기 위한 값입니다. 할 일은 고객사를 직접 고르지 않습니다.
 
 **projects** (관리자가 관리)
 
@@ -370,7 +370,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | status | VARCHAR(15) | NOT NULL | `IN_PROGRESS`, `DONE` |
 | | | IDX (project_id, status) | 프로젝트별 업무 목록 |
 
-### 4.4 TODO
+### 4.4 할 일
 
 **todo_types**
 
@@ -400,11 +400,11 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | period_end | DATE | NOT NULL | |
 | status | VARCHAR(10) | NOT NULL | `OPEN`, `DONE` |
 | completed_at | DATETIME(6) | NULL | 완료 취소 시 NULL |
-| notify_at | DATETIME(6) | NULL | TODO당 알림 1개 |
+| notify_at | DATETIME(6) | NULL | 할 일당 알림 1개 |
 | flow_url | VARCHAR(500) | NULL | 플로우 업무 링크 |
 | original_period_start | DATE | NULL | 처음 이월될 때의 원래 기간 시작일 |
 | carried_over_count | INT | NOT NULL, 기본 0 | 이월 횟수 |
-| | | UK (recurring_rule_id, occurrence_date) | 반복 생성 중복 방지 (둘 다 NULL인 일반 TODO는 제외됨) |
+| | | UK (recurring_rule_id, occurrence_date) | 반복 생성 중복 방지 (둘 다 NULL인 일반 할 일은 제외됨) |
 | | | IDX (owner_id, period_start) | 내 할 일 |
 | | | IDX (period_start) | 팀 할 일, 통계 |
 | | | IDX (project_id, period_start) | 프로젝트 필터, 프로젝트별 통계 |
@@ -416,18 +416,18 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 |---|---|---|---|
 | id | BIGINT | PK | |
 | owner_id | BIGINT | NOT NULL, FK → users | |
-| project_id | BIGINT | NULL, FK → projects | 생성되는 TODO에 복사 |
-| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | 생성되는 TODO에 복사 |
+| project_id | BIGINT | NULL, FK → projects | 생성되는 할 일에 복사 |
+| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | 생성되는 할 일에 복사 |
 | type_id | BIGINT | NULL, FK → todo_types | |
 | title | VARCHAR(200) | NOT NULL | |
 | recurrence | VARCHAR(10) | NOT NULL | `DAILY`, `WEEKDAYS`, `WEEKLY`, `MONTHLY` |
 | day_of_week | TINYINT | NULL | `WEEKLY`일 때 1(월)~7(일) |
 | day_of_month | TINYINT | NULL | `MONTHLY`일 때 1~31. 그 달에 없는 날이면 말일 |
-| notify_time | TIME | NULL | 생성된 TODO의 `notify_at` = 그날 + 이 시각 |
+| notify_time | TIME | NULL | 생성된 할 일의 `notify_at` = 그날 + 이 시각 |
 | status | VARCHAR(10) | NOT NULL | `ACTIVE`, `STOPPED` |
 | last_generated_date | DATE | NULL | 소급 생성 기준. 최대 7일까지 소급 |
 
-- 생성되는 TODO의 `period_type`은 `DAY`입니다(반복 TODO는 그날의 할 일).
+- 생성되는 할 일의 `period_type`은 `DAY`입니다(반복 할 일은 그날의 할 일).
 - `WEEKDAYS`는 주말과 `holidays`를 건너뜁니다.
 - 규칙을 수정하면 이후 생성분부터 반영됩니다.
 
@@ -440,8 +440,8 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | id | BIGINT | PK | |
 | author_id | BIGINT | NOT NULL, FK → users | |
 | project_id | BIGINT | NULL, FK → projects | |
-| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | TODO에 등록하면 TODO의 값을 복사 |
-| todo_id | BIGINT | NULL, FK → todos | ON DELETE SET NULL (TODO가 삭제돼도 업무에는 남음) |
+| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | 할 일에 등록하면 할 일의 값을 복사 |
+| todo_id | BIGINT | NULL, FK → todos | ON DELETE SET NULL (할 일이 삭제돼도 업무에는 남음) |
 | title | VARCHAR(200) | NOT NULL | |
 | content | MEDIUMTEXT | NULL | 마크다운 |
 | cause | TEXT | NULL | 원인 |
