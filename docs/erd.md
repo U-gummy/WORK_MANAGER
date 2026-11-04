@@ -19,6 +19,11 @@ erDiagram
     work_items |o--o{ todos : "TODO"
     work_items |o--o{ issues : "이슈"
     work_items |o--o{ deployments : "배포"
+    work_items |o--o{ recurring_todo_rules : "반복 규칙"
+    projects |o--o{ recurring_todo_rules : "뱃지"
+    projects |o--o{ issues : "이슈"
+    projects |o--o{ deployments : "배포"
+    users |o--o{ slack_channel : "등록"
     users ||--o{ todos : "내 할 일"
     users ||--o{ recurring_todo_rules : "반복 규칙"
     recurring_todo_rules |o--o{ todos : "생성"
@@ -55,6 +60,8 @@ erDiagram
         varchar webhook_url_enc
         varchar webhook_url_hint
         varchar status "CONNECTED | NEEDS_CHECK"
+        datetime verified_at
+        bigint registered_by FK
     }
     notification_channel_settings {
         varchar notification_type PK
@@ -159,6 +166,7 @@ erDiagram
         text memo
         varchar status "SCHEDULED | SUCCESS | FAILED | CANCELED"
         text result_note
+        datetime completed_at
     }
     leaves {
         bigint id PK
@@ -183,6 +191,7 @@ erDiagram
         varchar status
         datetime sent_at
         datetime read_at
+        varchar failure_reason
     }
     lunch_menus {
         bigint id PK
@@ -239,7 +248,7 @@ stateDiagram-v2
 ```
 
 - `source_type` + `source_id`: 알림의 원본(예: `TODO`, 42). 알림함에서 원본으로 이동할 때 사용. 다형 참조라 FK는 없습니다.
-- `UNIQUE (source_type, source_id, type, scheduled_at)`: 같은 알림이 두 번 예약되는 것을 막습니다.
+- `UNIQUE (source_type, source_id, type, scheduled_at)`: 같은 알림이 두 번 예약되는 것을 막습니다. 원본의 대상자나 시각이 바뀌면(배포 담당자 변경, 일시 변경) 새 행을 만들지 않고 **기존 `PENDING` 행을 고칩니다.**
 - **놓친 알림 판단**: 서버가 켜질 때와 매 분 스케줄러가 `PENDING AND scheduled_at < now - 5분`인 행을 `MISSED`로 바꿉니다.
 - 수신자에게 `slack_member_id`가 있으면 메시지에 `<@멤버ID>` 멘션을 붙이고, 없으면 `[이름]`을 붙입니다.
 - `user_id`가 `NULL`인 행은 **팀 메시지**(예: 팀 합계 주간 통계)입니다. 채널로만 보내고 개인 알림함에는 보이지 않습니다.
@@ -314,7 +323,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 
 | 컬럼 | 타입 | 제약 | 설명 |
 |---|---|---|---|
-| notification_type | VARCHAR(40) | PK | `TODO_REMINDER`, `DEPLOY_REMINDER`, `DEPLOY_ASSIGNED`, `LEAVE_NOTICE`, `TEAM_WEEKLY_SUMMARY` 등 |
+| notification_type | VARCHAR(40) | PK | `TODO_REMINDER`, `DEPLOY_REMINDER`, `DEPLOY_ASSIGNED`, `DEPLOY_ASSIGNEE_INACTIVE`, `LEAVE_NOTICE`, `TEAM_WEEKLY_SUMMARY` 등 |
 | channel_enabled | BOOLEAN | NOT NULL | 행이 없으면 켜진 것으로 간주 |
 
 **notification_preferences** (사용자 본인이 관리)
@@ -380,7 +389,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | id | BIGINT | PK | |
 | owner_id | BIGINT | NOT NULL, FK → users | 작성자 = 수행자 |
 | project_id | BIGINT | NULL, FK → projects | 3.5 참고. 뱃지, 필터 |
-| work_item_id | BIGINT | NULL, FK → work_items | |
+| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | |
 | type_id | BIGINT | NULL, FK → todo_types | |
 | recurring_rule_id | BIGINT | NULL, FK → recurring_todo_rules | ON DELETE SET NULL |
 | occurrence_date | DATE | NULL | 반복 규칙이 생성한 날짜. 이월해도 바뀌지 않음 |
@@ -408,7 +417,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | id | BIGINT | PK | |
 | owner_id | BIGINT | NOT NULL, FK → users | |
 | project_id | BIGINT | NULL, FK → projects | 생성되는 TODO에 복사 |
-| work_item_id | BIGINT | NULL, FK → work_items | 생성되는 TODO에 복사 |
+| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | 생성되는 TODO에 복사 |
 | type_id | BIGINT | NULL, FK → todo_types | |
 | title | VARCHAR(200) | NOT NULL | |
 | recurrence | VARCHAR(10) | NOT NULL | `DAILY`, `WEEKDAYS`, `WEEKLY`, `MONTHLY` |
@@ -431,7 +440,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | id | BIGINT | PK | |
 | author_id | BIGINT | NOT NULL, FK → users | |
 | project_id | BIGINT | NULL, FK → projects | |
-| work_item_id | BIGINT | NULL, FK → work_items | TODO에 등록하면 TODO의 값을 복사 |
+| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | TODO에 등록하면 TODO의 값을 복사 |
 | todo_id | BIGINT | NULL, FK → todos | ON DELETE SET NULL (TODO가 삭제돼도 업무에는 남음) |
 | title | VARCHAR(200) | NOT NULL | |
 | content | MEDIUMTEXT | NULL | 마크다운 |
@@ -464,7 +473,7 @@ TODO, 반복 규칙, 이슈, 배포는 모두 `project_id`와 `work_item_id`를 
 | registrant_id | BIGINT | NOT NULL, FK → users | |
 | assignee_id | BIGINT | NOT NULL, FK → users | 활성 사용자만 지정 가능(서비스 검증) |
 | project_id | BIGINT | NULL, FK → projects | |
-| work_item_id | BIGINT | NULL, FK → work_items | |
+| work_item_id | BIGINT | NULL, FK → work_items, ON DELETE SET NULL | |
 | title | VARCHAR(200) | NOT NULL | |
 | scheduled_at | DATETIME(6) | NOT NULL | 알림은 1시간 전 |
 | environment | VARCHAR(10) | NOT NULL | `DEV`, `PROD` |
